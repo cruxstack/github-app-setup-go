@@ -1,0 +1,33 @@
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: examples/simple/Dockerfile
+    ports:
+      - "${PORT:-8080}:8080"
+    volumes:
+      # persist credentials across restarts
+      - app-data:/data
+    environment:
+      - LOG_FORMAT=${LOG_FORMAT:-text}
+      - GITHUB_APP_INSTALLER_ENABLED=${GITHUB_APP_INSTALLER_ENABLED:-true}
+      - GITHUB_URL=${GITHUB_URL:-https://github.com}
+      - GITHUB_ORG=${GITHUB_ORG:-}
+      - STORAGE_MODE=envfile
+      - STORAGE_DIR=/data/.env
+      - CONFIG_WAIT_MAX_RETRIES=${CONFIG_WAIT_MAX_RETRIES:-30}
+      - CONFIG_WAIT_RETRY_INTERVAL=${CONFIG_WAIT_RETRY_INTERVAL:-2s}
+    env_file:
+      # load .env file if it exists (for pre-configured credentials)
+      - path: .env
+        required: false
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  app-data:
