@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{.AppDisplayName}} - GitHub App Installer</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f6f8fa;
+        }
+        .container {
+            background: white;
+            border: 1px solid #d0d7de;
+            border-radius: 6px;
+            padding: 24px;
+        }
+        h1 {
+            margin-top: 0;
+            color: #24292f;
+        }
+        p {
+            color: #57606a;
+            line-height: 1.5;
+        }
+        .form-group {
+            margin-bottom: 16px;
+        }
+        label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #24292f;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 8px 12px;
+            font-size: 14px;
+            border: 1px solid #d0d7de;
+            border-radius: 6px;
+            box-sizing: border-box;
+        }
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #0969da;
+            box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.3);
+        }
+        .help-text {
+            font-size: 12px;
+            color: #57606a;
+            margin-top: 4px;
+        }
+        button {
+            background: #2da44e;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            width: 100%;
+        }
+        button:hover {
+            background: #2c974b;
+        }
+        .info {
+            background: #ddf4ff;
+            border: 1px solid #54aeff;
+            border-radius: 6px;
+            padding: 12px;
+            margin-bottom: 16px;
+            font-size: 14px;
+        }
+        .warning {
+            background: #fff8c5;
+            border: 1px solid #d4a72c;
+            border-radius: 6px;
+            padding: 12px;
+            margin-bottom: 16px;
+            font-size: 14px;
+            color: #6e5b00;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>{{.AppDisplayName}} Installer</h1>
+        <p>Create a GitHub App with all the required permissions for {{.AppDisplayName}}.</p>
+        
+        <div class="info">
+            This will create a private GitHub App with pre-configured permissions.
+        </div>
+
+        {{if .GitHubOrg}}
+        <div class="info" style="background: #dafbe1; border-color: #2da44e;">
+            Creating app for organization: <strong>{{.GitHubOrg}}</strong>
+        </div>
+        {{else}}
+        <div class="info">
+            Creating app for your personal account. Set <code>GITHUB_ORG</code> to create for an organization instead.
+        </div>
+        {{end}}
+
+        <form id="manifest-form" action="{{.FormActionURL}}" method="post">
+            <div class="form-group">
+                <label for="app_name">App Name</label>
+                <input type="text" id="app_name" name="app_name_input" 
+                       placeholder="{{.DefaultAppName}}" 
+                       value="{{.DefaultAppName}}"
+                       oninput="updateManifest()">
+                <p class="help-text">The name for your GitHub App (must be unique across GitHub)</p>
+            </div>
+
+            {{if .NeedsWebhook}}
+            <div class="form-group">
+                <label for="webhook_url">Webhook URL</label>
+                <input type="text" id="webhook_url" name="webhook_url_input" 
+                       placeholder="https://example.com/webhook" 
+                       value="{{.WebhookURL}}"
+                       oninput="updateManifest()">
+                <p class="help-text">The URL where GitHub will send webhook events</p>
+            </div>
+            {{end}}
+            
+            <input type="hidden" name="manifest" id="manifest" value='{{.ManifestJSON}}'>
+            <button type="submit">Create GitHub App</button>
+        </form>
+    </div>
+
+    <script>
+        const baseManifest = {{.ManifestJSON}};
+        
+        function updateManifest() {
+            const manifest = {...baseManifest};
+            
+            // Update app name
+            const appNameEl = document.getElementById('app_name');
+            if (appNameEl) {
+                manifest.name = appNameEl.value || '{{.DefaultAppName}}';
+            }
+            
+            // Use the current page's origin for the redirect URL (not server-rendered value)
+            manifest.redirect_url = window.location.origin + '/callback';
+            
+            // Update webhook URL if the field exists
+            const webhookUrlEl = document.getElementById('webhook_url');
+            if (webhookUrlEl) {
+                const webhookUrl = webhookUrlEl.value;
+                manifest.hook_attributes = {...baseManifest.hook_attributes};
+                manifest.hook_attributes.url = webhookUrl;
+                manifest.hook_attributes.active = webhookUrl !== '';
+            }
+            
+            document.getElementById('manifest').value = JSON.stringify(manifest);
+        }
+        
+        // Save custom domain (from page hostname) to cookie before form submission
+        function saveCustomDomain() {
+            const customDomain = window.location.hostname;
+            document.cookie = 'custom_domain=' + encodeURIComponent(customDomain) + '; path=/; SameSite=Lax; max-age=3600';
+        }
+        
+        // Initialize manifest on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            updateManifest();
+            
+            // Add submit handler to save custom domain
+            const form = document.getElementById('manifest-form');
+            if (form) {
+                form.addEventListener('submit', saveCustomDomain);
+            }
+        });
+    </script>
+</body>
+</html>

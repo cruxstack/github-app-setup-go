@@ -1,0 +1,236 @@
+# Integration Test Scenarios for github-app-setup-go
+#
+# Each scenario tests a specific flow through the installer with mock GitHub API responses.
+# Tests are executed in order, each with a fresh environment (temp directory, new store).
+
+# =============================================================================
+# Setup Page Tests
+# =============================================================================
+
+- name: "setup_page_renders"
+  description: "GET /setup returns the installation form when not registered"
+  config:
+    app_display_name: "My Test App"
+  steps:
+    - action: request
+      method: GET
+      path: /setup
+      expect_status: 200
+      expect_body_contains:
+        - "My Test App"
+        - "Create GitHub App"
+  expected_store:
+    registered: false
+
+- name: "root_redirects_to_setup"
+  description: "GET / redirects to /setup when not registered"
+  steps:
+    - action: request
+      method: GET
+      path: /
+      expect_status: 302
+      expect_redirect: /setup
+
+# =============================================================================
+# Manifest Exchange Tests
+# =============================================================================
+
+- name: "successful_manifest_exchange"
+  description: "Complete GitHub App manifest flow with valid code"
+  config:
+    app_display_name: "Test App"
+  mock_responses:
+    # Note: For non-github.com URLs, the API path includes /api/v3/
+    - method: POST
+      path: /api/v3/app-manifests/validcode1234567890/conversions
+      status: 201
+      body: |
+        {
+          "id": 12345,
+          "slug": "test-app",
+          "client_id": "Iv1.abc123def456",
+          "client_secret": "secret_abc123",
+          "webhook_secret": "whsec_xyz789",
+          "pem": "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7MeXvzlsOgQpEwMKP\nrNYSEwpTMkpGNL8z0gVbPfJAwnqPbPLVJJWz0hpFNLfErL3wLqXW6FmmYKX7sGBO\nkgJQWoKzaMgSMDonhDmC9nLGnanV/WwnJ7hi7xwbLPJYR4NLnkGOKFVBFbg0BAZF\nvdGadVRZz0UuZkpZVMMPHdZPl1dCYrOnOGtCcGq0OyMmMklNMQBcB64CkZmQpGNR\nxaLwQPP7PjKXz8IxhqY1m1kNqR4wLBMFbPzXY6jUzK+p1TKMBMmklPxPiVUBpddV\nSfKnOK8pCIWyiQIDAQABAoIBAC9rsiMjXhwSk8lVPXBnMPNSRD2K9GFoNlMiYFIh\nrxrBD0bDHqLwUjYrFpZH8S3vkgMCn+4ZbPohUfFwxlOdpGQo0MAlkL3k84bvljDa\nn2hDYvPa1jHCktXvPxfhP9toE9cts01WnCGE4V+gQXNPNWN4VCV4O0NlKxsQ8aOo\nZMaKjzQPBc1SKeEALs9m5k3JgBJ9TpYlovHQ8HLTlSBNuMrjaQYGAIDAi+i7bE8X\nnLBEbghVUMgsVnJBaQIgJqTlEkvLnmLjviMYczsakPaoXfnPfLmPi7GjRrVPiAMp\nHYlMz8L2S9CRLqHv9qKMSQqVpNmVbYzPjYsSv2R9y4ECgYEA7o1qfQ9IR+kLkhM+\nXAM6Q+sTLjPVq+ONmy9vJwMGey0Dt4BjP3nPaWTg8YfLmSO8pW3KOuLV4ZPBsnoE\nkXSyPDF8pZmHOE32he3BnAM7LfPa1w9mnVYsLzRvg2zXl0dyuz4FlmJEMbvLOdkr\nbruFVM/S3FQOII9sFgkbXtKH2hkCgYEA4QrBuNCXvaFSyx6qaQL0Cj3T5OkNMb98\nlXkrPNvPS4Y3KsHrLoYr3ZN1p93MjFgf4Vf7Kv5W3skCKmMt8wQZQjkMCiiQ5zhi\njQS0aR5p7C0B4IujCJ+tqWVbXCBbpAtjrvQc5LPKymph6SXFWJ0Qk9prXXB+vpZc\n2L3o7F8TsEkCgYEAxk8DRnpBdR2NfNPJj5IvL3bDJQI3T7w2khFUn3JgO0L8tr2X\n6Yq4z9G6a8w5vK3kPlO5N1R8HqM3skRUhPLFnrKPmR5xPyK3S5hVf5i8tLs1oHif\nN2h4pM3sOoXmsjcH9H8i7rJNEfkJa5UA8mrnuBchpBdSdMv+B0fBnPCk64kCgYBP\nmTTi0xqyMTdCJvLN5bF5jsDqhp6ADn7DJ35dIwMJUDXHipNLkMXhMsJfH9wIjwDX\nGWfp8jCsgI0NKnLbPLU5C4xWP2xQp5rN9GWC9YlhVGQPHQEoDHTh5B7uPZKYo5S9\nA5v7d2vFMBXKPfDO2R8/LsZ8MGAO9Y2oEi3EFpUb4QKBgQDjXD0qCiCH89uMJS4h\nEUUSd19JqWtSJqSIuGcNYqHHHxplWlOPINOHD3t2WqLdLkLY7O2i8vCkOm+g41cI\n4a1MdCb8sYDm8HEi2LfPLfQ/SqKzx0nT7iDYGt8pZxJxYiEu7AqMb/HJwma+CQAU\nH5bQd0RoEhYWIKBXwT/k/wfmCw==\n-----END RSA PRIVATE KEY-----",
+          "html_url": "https://github.com/apps/test-app"
+        }
+  steps:
+    - action: request
+      method: GET
+      path: /callback?code=validcode1234567890
+      expect_status: 200
+      expect_body_contains:
+        - "test-app"
+        - "12345"
+  expected_store:
+    registered: true
+    app_id: 12345
+    app_slug: "test-app"
+  expected_calls:
+    - method: POST
+      path: /api/v3/app-manifests/validcode1234567890/conversions
+  expect_reload: true
+
+- name: "invalid_code_returns_error"
+  description: "GitHub API returns 404 for invalid code"
+  mock_responses:
+    - method: POST
+      path: /api/v3/app-manifests/invalidcode1234567/conversions
+      status: 404
+      body: '{"message": "Not Found"}'
+  steps:
+    - action: request
+      method: GET
+      path: /callback?code=invalidcode1234567
+      expect_status: 500
+      expect_body_contains:
+        - "Failed to exchange code"
+  expected_store:
+    registered: false
+  expected_calls:
+    - method: POST
+      path: /api/v3/app-manifests/invalidcode1234567/conversions
+
+- name: "missing_code_parameter"
+  description: "Callback without code parameter returns 400"
+  steps:
+    - action: request
+      method: GET
+      path: /callback
+      expect_status: 400
+      expect_body_contains:
+        - "Missing code"
+  expected_store:
+    registered: false
+
+# =============================================================================
+# Already Registered Tests
+# =============================================================================
+
+- name: "already_registered_shows_success"
+  description: "Visiting /setup when already registered shows success page"
+  preset_credentials:
+    app_id: 99999
+    app_slug: "existing-app"
+    client_id: "Iv1.existing123"
+    client_secret: "existing_secret"
+    webhook_secret: "existing_webhook"
+    html_url: "https://github.com/apps/existing-app"
+  steps:
+    - action: request
+      method: GET
+      path: /setup
+      expect_status: 200
+      expect_body_contains:
+        - "existing-app"
+        - "99999"
+  expected_store:
+    registered: true
+    app_id: 99999
+    app_slug: "existing-app"
+  expected_calls: []
+
+# =============================================================================
+# Disable Installer Tests
+# =============================================================================
+
+- name: "disable_installer_after_registration"
+  description: "POST /setup/disable marks installer as disabled"
+  preset_credentials:
+    app_id: 12345
+    app_slug: "my-app"
+    client_id: "Iv1.test"
+    client_secret: "test_secret"
+    webhook_secret: "test_webhook"
+    html_url: "https://github.com/apps/my-app"
+  steps:
+    - action: request
+      method: POST
+      path: /setup/disable
+      expect_status: 303
+  expected_store:
+    registered: true
+    installer_disabled: true
+
+- name: "disabled_installer_returns_404"
+  description: "GET / returns 404 when installer is disabled"
+  preset_credentials:
+    app_id: 12345
+    app_slug: "my-app"
+    client_id: "Iv1.test"
+    client_secret: "test_secret"
+    webhook_secret: "test_webhook"
+    html_url: "https://github.com/apps/my-app"
+  steps:
+    # First disable the installer
+    - action: request
+      method: POST
+      path: /setup/disable
+      expect_status: 303
+    # Then verify root returns 404
+    - action: request
+      method: GET
+      path: /
+      expect_status: 404
+  expected_store:
+    registered: true
+    installer_disabled: true
+
+- name: "disable_without_registration_fails"
+  description: "POST /setup/disable fails when not registered"
+  steps:
+    - action: request
+      method: POST
+      path: /setup/disable
+      expect_status: 400
+      expect_body_contains:
+        - "Cannot disable"
+  expected_store:
+    registered: false
+
+# =============================================================================
+# Error Handling Tests
+# =============================================================================
+
+- name: "github_api_server_error"
+  description: "GitHub API returns 500 server error"
+  mock_responses:
+    - method: POST
+      path: /api/v3/app-manifests/errorcode12345678/conversions
+      status: 500
+      body: '{"message": "Internal Server Error"}'
+  steps:
+    - action: request
+      method: GET
+      path: /callback?code=errorcode12345678
+      expect_status: 500
+      expect_body_contains:
+        - "Failed to exchange code"
+  expected_store:
+    registered: false
+
+- name: "unknown_path_returns_404"
+  description: "Unknown paths return 404"
+  steps:
+    - action: request
+      method: GET
+      path: /unknown/path
+      expect_status: 404
+
+# =============================================================================
+# Organization Scoped Tests
+# =============================================================================
+
+- name: "org_scoped_installer"
+  description: "Installer configured for organization shows correct form action"
+  config:
+    app_display_name: "Org App"
+    github_org: "my-organization"
+  steps:
+    - action: request
+      method: GET
+      path: /setup
+      expect_status: 200
+      expect_body_contains:
+        - "my-organization"
+        - "Org App"
