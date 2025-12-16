@@ -21,7 +21,6 @@ import (
 	"github.com/chainguard-dev/clog"
 
 	"github.com/cruxstack/github-app-setup-go/configstore"
-	"github.com/cruxstack/github-app-setup-go/configwait"
 )
 
 //go:embed templates/*
@@ -50,6 +49,11 @@ type Config struct {
 	RedirectURL        string
 	WebhookURL         string
 	OnCredentialsSaved CredentialsSavedFunc
+
+	// OnReloadNeeded is called after credentials are saved to trigger
+	// a configuration reload. This should be wired to the Runtime's
+	// ReloadCallback() or a custom reload function.
+	OnReloadNeeded func()
 }
 
 // NewConfigFromEnv creates a Config from environment variables.
@@ -281,8 +285,10 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	log.Infof("[installer] successfully created github app: slug=%s app_id=%d", creds.AppSlug, creds.AppID)
 
-	log.Infof("[installer] triggering configuration reload")
-	configwait.TriggerReload()
+	if h.config.OnReloadNeeded != nil {
+		log.Infof("[installer] triggering configuration reload")
+		h.config.OnReloadNeeded()
+	}
 
 	data := h.successDataFromCreds(creds)
 	h.renderSuccess(w, r, data)
