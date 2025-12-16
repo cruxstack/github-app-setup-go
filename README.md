@@ -7,12 +7,12 @@ utilities for configuration management in containerized environments.
 
 ## Features
 
+- **Unified runtime** - Single API for both HTTP servers and Lambda functions
 - **Web-based installer** - User-friendly UI for creating GitHub Apps with
   pre-configured permissions
 - **Multiple storage backends** - AWS SSM Parameter Store, `.env` files, or
   individual files
-- **Hot reload support** - Reload configuration via SIGHUP or programmatic
-  triggers
+- **Hot reload support** - Reload configuration via SIGHUP or installer callback
 - **SSM ARN resolution** - Resolve AWS SSM Parameter Store ARNs in environment
   variables (useful for Lambda)
 - **Ready gate** - HTTP middleware that returns 503 until configuration is
@@ -28,51 +28,38 @@ go get github.com/cruxstack/github-app-setup-go
 
 | Package       | Description                                               |
 |---------------|-----------------------------------------------------------|
+| `ghappsetup`  | **Unified runtime** for HTTP servers and Lambda functions |
 | `installer`   | HTTP handler implementing the GitHub App Manifest flow    |
 | `configstore` | Storage backends for GitHub App credentials               |
-| `configwait`  | Startup wait logic, ready gate middleware, and reload     |
+| `configwait`  | Startup wait logic and ready gate middleware              |
 | `ssmresolver` | Resolves SSM Parameter Store ARNs in environment vars     |
 
 ## Quick Start
+
+The `ghappsetup.Runtime` provides unified lifecycle management for both HTTP
+servers and Lambda functions:
 
 ```go
 package main
 
 import (
     "context"
+    "fmt"
     "log"
     "net/http"
+    "os"
 
-    "github.com/cruxstack/github-app-setup-go/configstore"
-    "github.com/cruxstack/github-app-setup-go/configwait"
+    "github.com/cruxstack/github-app-setup-go/ghappsetup"
     "github.com/cruxstack/github-app-setup-go/installer"
 )
 
 func main() {
     ctx := context.Background()
 
-    // Create a storage backend (uses STORAGE_MODE env var, defaults to .env file)
-    store, err := configstore.NewFromEnv()
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    // Define the GitHub App manifest with required permissions
-    manifest := installer.Manifest{
-        URL:    "https://example.com",
-        Public: false,
-        DefaultPerms: map[string]string{
-            "contents":      "read",
-            "pull_requests": "write",
-        },
-        DefaultEvents: []string{"pull_request", "push"},
-    }
-
-    // Create the installer handler
-    installerHandler, err := installer.New(installer.Config{
-        Store:          store,
-        Manifest:       manifest,
-        AppDisplayName: "My GitHub App",
+    // Create runtime with unified lifecycle management
+    runtime, err := ghappsetup.NewRuntime(ghappsetup.Config{
+        LoadFunc:     loadConfig,
+        AllowedPaths: []string{"/healthz", "/setup", "/callback", "/"},
     })
     if err != nil {
         log.Fatal(err)
@@ -80,15 +67,55 @@ func main() {
 
     // Set up routes
     mux := http.NewServeMux()
+    mux.HandleFunc("/healthz", runtime.HealthHandler())
+    mux.HandleFunc("/webhook", webhookHandler)
+
+    // Create installer using convenience method (auto-wires Store and reload callback)
+    installerHandler, err := runtime.InstallerHandler(installer.Config{
+        Manifest: installer.Manifest{
+            URL:    "https://example.com",
+            Public: false,
+            DefaultPerms: map[string]string{
+                "contents":      "read",
+                "pull_requests": "write",
+            },
+            DefaultEvents: []string{"pull_request", "push"},
+        },
+        AppDisplayName: "My GitHub App",
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
     mux.Handle("/setup", installerHandler)
     mux.Handle("/callback", installerHandler)
 
-    // Create a ready gate that allows /setup through before app is configured
-    gate := configwait.NewReadyGate(mux, []string{"/setup", "/callback", "/healthz"})
+    // Start HTTP server with ReadyGate middleware
+    srv := &http.Server{
+        Addr:    ":8080",
+        Handler: runtime.Handler(mux),
+    }
+    go srv.ListenAndServe()
 
-    // Start the server
-    log.Println("Starting server on :8080")
-    log.Fatal(http.ListenAndServe(":8080", gate))
+    // Block until config loads, then listen for SIGHUP reloads
+    if err := runtime.Start(ctx); err != nil {
+        log.Fatal(err)
+    }
+    log.Println("Configuration loaded, service is ready")
+    runtime.ListenForReloads(ctx)
+}
+
+func loadConfig(ctx context.Context) error {
+    // Validate required environment variables are present
+    if os.Getenv("GITHUB_APP_ID") == "" {
+        return fmt.Errorf("GITHUB_APP_ID not set")
+    }
+    return nil
+}
+
+func webhookHandler(w http.ResponseWriter, r *http.Request) {
+    // Handle GitHub webhooks
+    w.WriteHeader(http.StatusOK)
 }
 ```
 
@@ -158,25 +185,53 @@ store := configstore.NewLocalFileStore("./secrets/")
 
 ## Hot Reload
 
-The library supports hot-reloading configuration via SIGHUP signals or
-programmatic triggers:
+The Runtime supports hot-reloading configuration via SIGHUP signals. When the
+installer saves new credentials, it automatically triggers a reload via the
+callback:
 
 ```go
-// Create a reloader that calls your reload function
-reloader := configwait.NewReloader(ctx, gate, func(ctx context.Context) error {
-    // Reload your configuration here
-    newHandler := buildHandler()
-    gate.SetHandler(newHandler)
-    gate.SetReady()
-    return nil
-})
-
-// Set as global reloader (allows installer to trigger reload after saving)
-configwait.SetGlobalReloader(reloader)
-
-// Start listening for SIGHUP
-reloader.Start()
+// ListenForReloads handles both SIGHUP signals and installer callbacks
+runtime.ListenForReloads(ctx)
 ```
+
+For manual reload triggering:
+
+```go
+// Trigger a reload programmatically
+runtime.Reload()
+```
+
+## Lambda Usage
+
+For AWS Lambda functions, use `EnsureLoaded()` for lazy initialization:
+
+```go
+var runtime *ghappsetup.Runtime
+
+func init() {
+    runtime, _ = ghappsetup.NewRuntime(ghappsetup.Config{
+        LoadFunc: func(ctx context.Context) error {
+            // Resolve SSM parameters passed as ARNs
+            if err := ssmresolver.ResolveEnvironmentWithDefaults(ctx); err != nil {
+                return err
+            }
+            return validateConfig()
+        },
+    })
+}
+
+func handler(ctx context.Context, req events.APIGatewayV2HTTPRequest) (Response, error) {
+    // Lazy-load config with retries (idempotent after first success)
+    if err := runtime.EnsureLoaded(ctx); err != nil {
+        return Response{StatusCode: 503, Body: "Service unavailable"}, nil
+    }
+    return handleRequest(ctx, req)
+}
+```
+
+The Runtime auto-detects Lambda environments and adjusts retry settings:
+- **HTTP**: 30 retries, 2-second intervals (suitable for startup)
+- **Lambda**: 5 retries, 1-second intervals (suitable for cold starts)
 
 ## SSM ARN Resolution
 

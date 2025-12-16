@@ -15,13 +15,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/cruxstack/github-app-setup-go/configstore"
-	"github.com/cruxstack/github-app-setup-go/configwait"
 	"github.com/cruxstack/github-app-setup-go/installer"
 )
 
@@ -176,8 +176,8 @@ func (r *ScenarioRunner) Run(scenario Scenario) {
 			}
 		}
 
-		// Reset reload counter
-		configwait.ResetReloadCounter()
+		// Track reload calls using atomic counter
+		var reloadCount atomic.Int64
 
 		// Create installer handler
 		cfg := installer.Config{
@@ -193,6 +193,11 @@ func (r *ScenarioRunner) Run(scenario Scenario) {
 		}
 		if scenario.Config.WebhookURL != "" {
 			cfg.WebhookURL = scenario.Config.WebhookURL
+		}
+
+		// Set up reload callback to track reload calls
+		cfg.OnReloadNeeded = func() {
+			reloadCount.Add(1)
 		}
 
 		handler, err := installer.New(cfg)
@@ -290,7 +295,7 @@ func (r *ScenarioRunner) Run(scenario Scenario) {
 
 		// Verify reload was triggered if expected
 		if scenario.ExpectReload {
-			count := configwait.GetReloadCount()
+			count := reloadCount.Load()
 			if count == 0 {
 				t.Errorf("expected reload to be triggered, but it was not")
 			}

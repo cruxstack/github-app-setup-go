@@ -1,7 +1,8 @@
 // Copyright 2025 CruxStack
 // SPDX-License-Identifier: MIT
 
-// Example demonstrating a GitHub App with webhook handling.
+// Example demonstrating a GitHub App with webhook handling using the
+// ghappsetup.Runtime for unified lifecycle management.
 package main
 
 import (
@@ -20,7 +21,7 @@ import (
 	"time"
 
 	"github.com/cruxstack/github-app-setup-go/configstore"
-	"github.com/cruxstack/github-app-setup-go/configwait"
+	"github.com/cruxstack/github-app-setup-go/ghappsetup"
 	"github.com/cruxstack/github-app-setup-go/installer"
 )
 
@@ -42,32 +43,31 @@ func main() {
 		fmt.Sscanf(p, "%d", &port)
 	}
 
-	allowedPaths := []string{"/healthz"}
 	installerEnabled := configstore.InstallerEnabled()
+
+	// Determine allowed paths for the ReadyGate
+	allowedPaths := []string{"/healthz"}
 	if installerEnabled {
 		allowedPaths = append(allowedPaths, "/setup", "/callback", "/")
 	}
 
-	gate := configwait.NewReadyGate(nil, allowedPaths)
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		if gate.IsReady() {
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("ok"))
-		} else {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte("not ready"))
-		}
+	// Create the Runtime with unified lifecycle management
+	runtime, err := ghappsetup.NewRuntime(ghappsetup.Config{
+		LoadFunc:     func(ctx context.Context) error { return loadConfig(ctx, log) },
+		AllowedPaths: allowedPaths,
 	})
+	if err != nil {
+		log.Error("failed to create runtime", "error", err)
+		os.Exit(1)
+	}
 
+	// Set up HTTP routes
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", runtime.HealthHandler())
+	mux.HandleFunc("/webhook", webhookHandler(log))
+
+	// Set up installer if enabled (using Option B: convenience method)
 	if installerEnabled {
-		store, err := configstore.NewFromEnv()
-		if err != nil {
-			log.Error("failed to create config store", "error", err)
-			os.Exit(1)
-		}
-
 		manifest := installer.Manifest{
 			URL:    "https://github.com/cruxstack/github-app-setup-go",
 			Public: false,
@@ -81,12 +81,12 @@ func main() {
 			},
 		}
 
-		installerCfg := installer.NewConfigFromEnv()
-		installerCfg.Store = store
-		installerCfg.Manifest = manifest
-		installerCfg.AppDisplayName = "Simple Webhook App"
-
-		installerHandler, err := installer.New(installerCfg)
+		installerHandler, err := runtime.InstallerHandler(installer.Config{
+			Manifest:       manifest,
+			AppDisplayName: "Simple Webhook App",
+			GitHubURL:      configstore.GetEnvDefault("GITHUB_URL", "https://github.com"),
+			GitHubOrg:      os.Getenv("GITHUB_ORG"),
+		})
 		if err != nil {
 			log.Error("failed to create installer handler", "error", err)
 			os.Exit(1)
@@ -100,16 +100,16 @@ func main() {
 		log.Info("installer enabled, visit /setup to create GitHub App")
 	}
 
-	gate.SetHandler(mux)
-
+	// Create server with Runtime's handler (includes ReadyGate)
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
 		ReadHeaderTimeout: defaultReadHeaderTimeout,
-		Handler:           gate,
+		Handler:           runtime.Handler(mux),
 	}
 
 	log.Info("starting HTTP server", "port", port, "installer_enabled", installerEnabled)
 
+	// Start the HTTP server
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Error("server error", "error", err)
@@ -117,28 +117,18 @@ func main() {
 		}
 	}()
 
+	// Start configuration loading (blocks until config is loaded)
 	go func() {
-		waitCfg := configwait.NewConfigFromEnv()
-
-		err := configwait.Wait(ctx, waitCfg, func(ctx context.Context) error {
-			return loadConfig(ctx, log, mux)
-		})
-
-		if err != nil {
+		if err := runtime.Start(ctx); err != nil {
 			log.Error("failed to load configuration after retries", "error", err)
 			os.Exit(1)
 		}
-
 		log.Info("configuration loaded, service is ready")
-		gate.SetReady()
 
-		reloader := configwait.NewReloader(ctx, gate, func(ctx context.Context) error {
-			return loadConfig(ctx, log, mux)
-		})
-		configwait.SetGlobalReloader(reloader)
-		reloader.Start()
-
+		// Listen for reload triggers (SIGHUP or installer callback)
+		done := runtime.ListenForReloads(ctx)
 		log.Info("configuration reloader started (send SIGHUP to reload)")
+		<-done
 	}()
 
 	<-ctx.Done()
@@ -153,8 +143,8 @@ func main() {
 	}
 }
 
-// loadConfig loads configuration and sets up the webhook handler.
-func loadConfig(_ context.Context, log *slog.Logger, mux *http.ServeMux) error {
+// loadConfig loads configuration from environment variables.
+func loadConfig(_ context.Context, log *slog.Logger) error {
 	webhookSecret := os.Getenv(configstore.EnvGitHubWebhookSecret)
 	if webhookSecret == "" {
 		return fmt.Errorf("%s is not set", configstore.EnvGitHubWebhookSecret)
@@ -166,14 +156,11 @@ func loadConfig(_ context.Context, log *slog.Logger, mux *http.ServeMux) error {
 	}
 
 	log.Info("loaded GitHub App configuration", "app_id", appID)
-
-	mux.HandleFunc("/webhook", webhookHandler(log, webhookSecret))
-
 	return nil
 }
 
 // webhookHandler returns an HTTP handler that processes GitHub webhooks.
-func webhookHandler(log *slog.Logger, secret string) http.HandlerFunc {
+func webhookHandler(log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -188,6 +175,8 @@ func webhookHandler(log *slog.Logger, secret string) http.HandlerFunc {
 		}
 		defer r.Body.Close()
 
+		// Get webhook secret from environment (loaded by loadConfig)
+		secret := os.Getenv(configstore.EnvGitHubWebhookSecret)
 		signature := r.Header.Get("X-Hub-Signature-256")
 		if !validateSignature(body, signature, secret) {
 			log.Warn("webhook signature validation failed",
