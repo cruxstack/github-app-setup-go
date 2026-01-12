@@ -3,7 +3,7 @@ module github.com/cruxstack/github-app-setup-go
 go 1.25
 
 require (
-	github.com/aws/aws-sdk-go-v2 v1.41.0
+	github.com/aws/aws-sdk-go-v2 v1.41.1
 	github.com/aws/aws-sdk-go-v2/config v1.32.6
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.67.7
 	github.com/chainguard-dev/clog v1.8.0
