@@ -7,8 +7,10 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -32,35 +34,33 @@ func (s *LocalEnvFileStore) Save(ctx context.Context, creds *AppCredentials) err
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
 
-	existingValues, originalLines, err := parseEnvFile(s.FilePath)
+	_, originalLines, err := parseEnvFile(s.FilePath)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to read existing .env file: %w", err)
 	}
-	if existingValues == nil {
-		existingValues = make(map[string]string)
-	}
 
+	updates := make(map[string]string)
 	for key, value := range creds.CustomFields {
 		if value != "" {
-			existingValues[key] = value
+			updates[key] = value
 		}
 	}
 
 	singleLinePEM := strings.ReplaceAll(creds.PrivateKey, "\n", "\\n")
 
-	existingValues[EnvGitHubAppID] = fmt.Sprintf("%d", creds.AppID)
-	existingValues[EnvGitHubWebhookSecret] = creds.WebhookSecret
-	existingValues[EnvGitHubClientID] = creds.ClientID
-	existingValues[EnvGitHubClientSecret] = creds.ClientSecret
-	existingValues[EnvGitHubAppPrivateKey] = singleLinePEM
+	updates[EnvGitHubAppID] = fmt.Sprintf("%d", creds.AppID)
+	updates[EnvGitHubWebhookSecret] = creds.WebhookSecret
+	updates[EnvGitHubClientID] = creds.ClientID
+	updates[EnvGitHubClientSecret] = creds.ClientSecret
+	updates[EnvGitHubAppPrivateKey] = singleLinePEM
 	if creds.AppSlug != "" {
-		existingValues[EnvGitHubAppSlug] = creds.AppSlug
+		updates[EnvGitHubAppSlug] = creds.AppSlug
 	}
 	if creds.HTMLURL != "" {
-		existingValues[EnvGitHubAppHTMLURL] = creds.HTMLURL
+		updates[EnvGitHubAppHTMLURL] = creds.HTMLURL
 	}
 
-	if err := writeEnvFile(s.FilePath, existingValues, originalLines); err != nil {
+	if err := writeEnvFile(s.FilePath, updates, originalLines); err != nil {
 		return fmt.Errorf("failed to write .env file: %w", err)
 	}
 
@@ -131,6 +131,9 @@ func parseEnvFile(path string) (map[string]string, []string, error) {
 	return values, lines, nil
 }
 
+// writeEnvFile rewrites only the lines whose keys appear in values and appends
+// any keys not already present. All other lines are preserved verbatim so that
+// quoting, inline comments, and formatting of unrelated entries are untouched.
 func writeEnvFile(path string, values map[string]string, originalLines []string) error {
 	var outputLines []string
 	writtenKeys := make(map[string]bool)
@@ -159,9 +162,9 @@ func writeEnvFile(path string, values map[string]string, originalLines []string)
 		}
 	}
 
-	for key, value := range values {
+	for _, key := range slices.Sorted(maps.Keys(values)) {
 		if !writtenKeys[key] {
-			outputLines = append(outputLines, formatEnvLine(key, value))
+			outputLines = append(outputLines, formatEnvLine(key, values[key]))
 		}
 	}
 
@@ -225,19 +228,13 @@ func (s *LocalEnvFileStore) DisableInstaller(ctx context.Context) error {
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
 
-	values, originalLines, err := parseEnvFile(s.FilePath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return err
-		}
-	}
-	if values == nil {
-		values = make(map[string]string)
+	_, originalLines, err := parseEnvFile(s.FilePath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
 	}
 
-	values[EnvGitHubAppInstallerEnabled] = "false"
-
-	if err := writeEnvFile(s.FilePath, values, originalLines); err != nil {
+	updates := map[string]string{EnvGitHubAppInstallerEnabled: "false"}
+	if err := writeEnvFile(s.FilePath, updates, originalLines); err != nil {
 		return fmt.Errorf("failed to persist installer flag: %w", err)
 	}
 

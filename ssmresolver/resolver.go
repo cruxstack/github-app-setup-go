@@ -28,7 +28,9 @@ const (
 	DefaultRetryInterval = 1 * time.Second
 )
 
-var ssmARNPattern = regexp.MustCompile(`^arn:aws:ssm:[^:]+:[^:]+:parameter/(.+)$`)
+// ssmARNPattern matches SSM parameter ARNs in any AWS partition (aws, aws-cn,
+// aws-us-gov, aws-iso, ...).
+var ssmARNPattern = regexp.MustCompile(`^arn:aws(?:-[a-z]+)*:ssm:[^:]+:[^:]+:parameter/(.+)$`)
 
 // Client defines the interface for SSM operations.
 type Client interface {
@@ -160,12 +162,14 @@ func NewRetryConfigFromEnv() RetryConfig {
 	return cfg
 }
 
-// ResolveEnvironmentWithRetry resolves all environment variables with retry logic.
+// ResolveEnvironmentWithRetry resolves all environment variables with retry
+// logic. Resolution is always attempted at least once.
 func ResolveEnvironmentWithRetry(ctx context.Context, cfg RetryConfig) error {
 	log := clog.FromContext(ctx)
 	var lastErr error
+	maxAttempts := max(cfg.MaxRetries, 1)
 
-	for attempt := 1; attempt <= cfg.MaxRetries; attempt++ {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		err := ResolveEnvironmentWithDefaults(ctx)
 		if err == nil {
 			if attempt > 1 {
@@ -175,9 +179,9 @@ func ResolveEnvironmentWithRetry(ctx context.Context, cfg RetryConfig) error {
 		}
 
 		lastErr = err
-		log.Warnf("[ssmresolver] attempt %d/%d failed: %v", attempt, cfg.MaxRetries, err)
+		log.Warnf("[ssmresolver] attempt %d/%d failed: %v", attempt, maxAttempts, err)
 
-		if attempt < cfg.MaxRetries {
+		if attempt < maxAttempts {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()

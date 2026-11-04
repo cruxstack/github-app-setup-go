@@ -281,3 +281,53 @@ func (m *httpMockStore) Status(ctx context.Context) (*configstore.InstallerStatu
 func (m *httpMockStore) DisableInstaller(ctx context.Context) error {
 	return nil
 }
+
+func TestRuntime_ListenForReloads_MarksReadyAfterFailedStart(t *testing.T) {
+	os.Unsetenv("AWS_LAMBDA_FUNCTION_NAME")
+
+	var configured atomic.Bool
+	runtime, err := NewRuntime(Config{
+		Store: &mockStore{},
+		LoadFunc: func(ctx context.Context) error {
+			if !configured.Load() {
+				return errors.New("not configured")
+			}
+			return nil
+		},
+		MaxRetries:    1,
+		RetryInterval: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := runtime.Start(ctx); err == nil {
+		t.Fatal("Start() error = nil, want error")
+	}
+	handler := runtime.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	runtime.ListenForReloads(ctx)
+
+	// Simulate the installer saving credentials and requesting a reload.
+	configured.Store(true)
+	runtime.ReloadCallback()()
+
+	deadline := time.Now().Add(time.Second)
+	for !runtime.IsReady() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !runtime.IsReady() {
+		t.Fatal("IsReady() = false after successful reload, want true")
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/webhook", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("gated request status = %d, want %d", rec.Code, http.StatusOK)
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,17 +61,19 @@ func NewConfigFromEnv() Config {
 // LoadFunc attempts to load configuration; returns nil on success.
 type LoadFunc func(ctx context.Context) error
 
-// Wait blocks until load succeeds or max retries is reached.
+// Wait blocks until load succeeds or max retries is reached. Load is always
+// attempted at least once, even if MaxRetries is zero or negative.
 func Wait(ctx context.Context, cfg Config, load LoadFunc) error {
 	log := clog.FromContext(ctx)
 	var lastErr error
+	maxAttempts := max(cfg.MaxRetries, 1)
 
-	for attempt := 1; attempt <= cfg.MaxRetries; attempt++ {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if err := load(ctx); err != nil {
 			lastErr = err
-			log.Warnf("[configwait] attempt %d/%d failed: %v", attempt, cfg.MaxRetries, err)
+			log.Warnf("[configwait] attempt %d/%d failed: %v", attempt, maxAttempts, err)
 
-			if attempt < cfg.MaxRetries {
+			if attempt < maxAttempts {
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
@@ -101,12 +104,33 @@ type ReadyGate struct {
 }
 
 // NewReadyGate creates a ReadyGate wrapping the given handler.
-// The allowedPaths are path prefixes always allowed through (e.g., "/setup").
+//
+// The allowedPaths are always allowed through, even before the gate is ready.
+// Each entry matches the path itself and anything beneath it on a path-segment
+// boundary: "/setup" allows "/setup", "/setup/", and "/setup/disable", but not
+// "/setupadmin". The entry "/" matches only the root path. Requests whose path
+// is not canonical (dot segments, repeated slashes) never bypass the gate, so
+// a path such as "/setup/../webhook" cannot reach a gated handler early.
+//
 // The inner handler can be nil initially; call SetHandler() once ready.
 func NewReadyGate(inner http.Handler, allowedPaths []string) *ReadyGate {
+	normalized := make([]string, 0, len(allowedPaths))
+	for _, p := range allowedPaths {
+		if p == "" {
+			continue
+		}
+		if p != "/" {
+			p = strings.TrimRight(p, "/")
+			if p == "" {
+				p = "/"
+			}
+		}
+		normalized = append(normalized, p)
+	}
+
 	rg := &ReadyGate{
 		inner:        inner,
-		allowedPaths: allowedPaths,
+		allowedPaths: normalized,
 		handlerReady: make(chan struct{}),
 	}
 	if inner != nil {
@@ -162,20 +186,41 @@ func (rg *ReadyGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.ServeHTTP(w, r)
 }
 
-// isAllowedPath checks if the path matches any allowed path prefix.
-func (rg *ReadyGate) isAllowedPath(path string) bool {
+// isAllowedPath reports whether a request path may bypass the gate. Only
+// canonical paths qualify: otherwise the inner router could resolve the path
+// differently than this check does (e.g., "/setup/../webhook").
+func (rg *ReadyGate) isAllowedPath(p string) bool {
+	if p == "" || p != cleanPath(p) {
+		return false
+	}
 	for _, allowed := range rg.allowedPaths {
 		if allowed == "/" {
-			if path == "/" {
+			if p == "/" {
 				return true
 			}
 			continue
 		}
-		if strings.HasPrefix(path, allowed) {
+		if p == allowed || strings.HasPrefix(p, allowed+"/") {
 			return true
 		}
 	}
 	return false
+}
+
+// cleanPath returns the canonical form of p, mirroring net/http.ServeMux:
+// it resolves dot segments and repeated slashes and keeps a trailing slash.
+func cleanPath(p string) string {
+	if p == "" {
+		return "/"
+	}
+	if p[0] != '/' {
+		p = "/" + p
+	}
+	np := path.Clean(p)
+	if p[len(p)-1] == '/' && np != "/" {
+		np += "/"
+	}
+	return np
 }
 
 // getHandler returns the current handler.

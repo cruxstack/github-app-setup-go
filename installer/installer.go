@@ -14,6 +14,7 @@ import (
 	"html/template"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -95,6 +96,7 @@ func New(cfg Config) (*Handler, error) {
 	if cfg.Store == nil {
 		return nil, fmt.Errorf("store is required")
 	}
+	cfg.GitHubURL = strings.TrimRight(cfg.GitHubURL, "/")
 	if cfg.GitHubURL == "" {
 		cfg.GitHubURL = "https://github.com"
 	}
@@ -195,7 +197,7 @@ func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {
 	var formActionURL string
 	if h.config.GitHubOrg != "" {
 		formActionURL = fmt.Sprintf("%s/organizations/%s/settings/apps/new",
-			h.config.GitHubURL, h.config.GitHubOrg)
+			h.config.GitHubURL, url.PathEscape(h.config.GitHubOrg))
 	} else {
 		formActionURL = fmt.Sprintf("%s/settings/apps/new", h.config.GitHubURL)
 	}
@@ -245,6 +247,19 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Once the installer is disabled, refuse to exchange new codes so the
+	// saved credentials cannot be replaced by anyone who can reach /callback.
+	status, err := h.config.Store.Status(ctx)
+	if err != nil {
+		log.Errorf("[installer] failed to read installer status: %v", err)
+		http.Error(w, "Failed to load installer status", http.StatusInternalServerError)
+		return
+	}
+	if status != nil && status.InstallerDisabled {
+		http.NotFound(w, r)
+		return
+	}
+
 	var customDomain string
 	if cookie, err := r.Cookie("custom_domain"); err == nil {
 		customDomain = cookie.Value
@@ -271,12 +286,6 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		creds.CustomFields["CUSTOM_DOMAIN"] = customDomain
 	}
 
-	if h.config.OnCredentialsSaved != nil {
-		if err := h.config.OnCredentialsSaved(ctx, creds); err != nil {
-			log.Errorf("[installer] OnCredentialsSaved callback failed: %v", err)
-		}
-	}
-
 	if err := h.config.Store.Save(ctx, creds); err != nil {
 		log.Errorf("[installer] failed to save credentials: %v", err)
 		http.Error(w, "Failed to save credentials", http.StatusInternalServerError)
@@ -284,6 +293,12 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Infof("[installer] successfully created github app: slug=%s app_id=%d", creds.AppSlug, creds.AppID)
+
+	if h.config.OnCredentialsSaved != nil {
+		if err := h.config.OnCredentialsSaved(ctx, creds); err != nil {
+			log.Errorf("[installer] OnCredentialsSaved callback failed: %v", err)
+		}
+	}
 
 	if h.config.OnReloadNeeded != nil {
 		log.Infof("[installer] triggering configuration reload")
@@ -296,13 +311,15 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 // exchangeCode exchanges the temporary code for app credentials.
 func (h *Handler) exchangeCode(ctx context.Context, code string) (*configstore.AppCredentials, error) {
-	url := fmt.Sprintf("%s/api/v3/app-manifests/%s/conversions", h.config.GitHubURL, code)
+	// code is validated by isValidOAuthCode (alphanumeric only), so it cannot
+	// inject path segments; escape anyway as defense in depth.
+	endpoint := fmt.Sprintf("%s/api/v3/app-manifests/%s/conversions", h.config.GitHubURL, url.PathEscape(code))
 
 	if h.config.GitHubURL == "https://github.com" {
-		url = fmt.Sprintf("https://api.github.com/app-manifests/%s/conversions", code)
+		endpoint = fmt.Sprintf("https://api.github.com/app-manifests/%s/conversions", url.PathEscape(code))
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -393,7 +410,7 @@ func (h *Handler) installURLFor(slug, htmlURL string) string {
 		if githubURL == "" {
 			githubURL = "https://github.com"
 		}
-		return fmt.Sprintf("%s/apps/%s/installations/new", githubURL, slug)
+		return fmt.Sprintf("%s/apps/%s/installations/new", githubURL, url.PathEscape(slug))
 	}
 	if htmlURL != "" {
 		trimmed := strings.TrimRight(htmlURL, "/")
