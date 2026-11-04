@@ -10,6 +10,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/chainguard-dev/clog"
+
 	"github.com/cruxstack/github-app-setup-go/configwait"
 )
 
@@ -93,10 +95,10 @@ func (r *Runtime) ListenForReloads(ctx context.Context) <-chan struct{} {
 
 // doReload performs the actual reload operation.
 func (r *Runtime) doReload(ctx context.Context) {
-	if err := r.config.LoadFunc(ctx); err != nil {
-		// Log error but don't crash - reload failures are non-fatal
-		// The application continues running with the previous configuration
-		return
+	if err := r.Reload(ctx); err != nil {
+		// Reload failures are non-fatal; the application continues running
+		// with the previous configuration.
+		clog.FromContext(ctx).Errorf("[ghappsetup] reload failed: %v", err)
 	}
 }
 

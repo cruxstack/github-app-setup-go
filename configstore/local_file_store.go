@@ -54,7 +54,10 @@ func (s *LocalFileStore) Save(ctx context.Context, creds *AppCredentials) error 
 
 	for key, value := range creds.CustomFields {
 		if value != "" {
-			filename := strings.ToLower(strings.ReplaceAll(key, "_", "-"))
+			filename, err := customFieldFileName(key)
+			if err != nil {
+				return err
+			}
 			files[filename] = struct {
 				content string
 				mode    os.FileMode
@@ -132,6 +135,34 @@ func (s *LocalFileStore) DisableInstaller(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// reservedFileNames are the files LocalFileStore manages itself. Custom fields
+// must not overwrite them (e.g., replacing the private key or creating the
+// installer-disabled marker).
+var reservedFileNames = map[string]bool{
+	"app-id":             true,
+	"app-slug":           true,
+	"app-html-url":       true,
+	"client-id":          true,
+	"client-secret":      true,
+	"webhook-secret":     true,
+	"private-key.pem":    true,
+	"installer-disabled": true,
+}
+
+// customFieldFileName maps a custom field key to its file name (lowercase,
+// underscores replaced with dashes) and rejects keys that would escape the
+// store directory or collide with a file the store manages.
+func customFieldFileName(key string) (string, error) {
+	name := strings.ToLower(strings.ReplaceAll(key, "_", "-"))
+	if name == "." || !filepath.IsLocal(name) || strings.ContainsAny(name, `/\`) {
+		return "", fmt.Errorf("invalid custom field key %q: must map to a plain file name", key)
+	}
+	if reservedFileNames[name] {
+		return "", fmt.Errorf("invalid custom field key %q: conflicts with reserved file %q", key, name)
+	}
+	return name, nil
 }
 
 func readTrimmedFile(path string) (string, error) {

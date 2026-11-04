@@ -277,3 +277,83 @@ func (m *lambdaMockStore) Status(ctx context.Context) (*configstore.InstallerSta
 func (m *lambdaMockStore) DisableInstaller(ctx context.Context) error {
 	return nil
 }
+
+func TestRuntime_EnsureLoaded_NegativeMaxRetriesStillLoads(t *testing.T) {
+	os.Setenv("AWS_LAMBDA_FUNCTION_NAME", "test-function")
+	defer os.Unsetenv("AWS_LAMBDA_FUNCTION_NAME")
+
+	var calls atomic.Int32
+	wantErr := errors.New("not configured")
+	runtime, err := NewRuntime(Config{
+		Store: &lambdaMockStore{},
+		LoadFunc: func(ctx context.Context) error {
+			calls.Add(1)
+			return wantErr
+		},
+		MaxRetries: -1,
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime() error = %v", err)
+	}
+
+	if err := runtime.EnsureLoaded(context.Background()); !errors.Is(err, wantErr) {
+		t.Errorf("EnsureLoaded() error = %v, want %v", err, wantErr)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("LoadFunc called %d times, want 1", got)
+	}
+	if runtime.IsReady() {
+		t.Error("IsReady() = true without a successful load")
+	}
+}
+
+func TestRuntime_EnsureLoaded_RetriesAfterFailure(t *testing.T) {
+	os.Setenv("AWS_LAMBDA_FUNCTION_NAME", "test-function")
+	defer os.Unsetenv("AWS_LAMBDA_FUNCTION_NAME")
+
+	var calls atomic.Int32
+	var configured atomic.Bool
+	runtime, err := NewRuntime(Config{
+		Store: &lambdaMockStore{},
+		LoadFunc: func(ctx context.Context) error {
+			calls.Add(1)
+			if !configured.Load() {
+				return errors.New("not configured")
+			}
+			return nil
+		},
+		MaxRetries:    2,
+		RetryInterval: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime() error = %v", err)
+	}
+
+	ctx := context.Background()
+	if err := runtime.EnsureLoaded(ctx); err == nil {
+		t.Fatal("first EnsureLoaded() error = nil, want error")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("LoadFunc called %d times after first failure, want 2", got)
+	}
+
+	// A failed load is not cached: the next call runs the full retry policy again.
+	configured.Store(true)
+	if err := runtime.EnsureLoaded(ctx); err != nil {
+		t.Fatalf("second EnsureLoaded() error = %v, want nil", err)
+	}
+	if got := calls.Load(); got != 3 {
+		t.Errorf("LoadFunc called %d times total, want 3", got)
+	}
+	if !runtime.IsReady() {
+		t.Error("IsReady() = false after successful reload")
+	}
+
+	// Once loaded, further calls return immediately without loading again.
+	if err := runtime.EnsureLoaded(ctx); err != nil {
+		t.Fatalf("third EnsureLoaded() error = %v", err)
+	}
+	if got := calls.Load(); got != 3 {
+		t.Errorf("LoadFunc called %d times after success, want 3", got)
+	}
+}

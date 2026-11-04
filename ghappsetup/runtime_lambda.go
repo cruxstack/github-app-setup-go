@@ -39,12 +39,14 @@ func (r *Runtime) getLambdaState() *lambdaState {
 }
 
 // EnsureLoaded ensures that configuration has been loaded, performing
-// lazy initialization if needed. This method is idempotent and safe to
-// call from multiple goroutines.
+// lazy initialization if needed. It is safe to call from multiple goroutines.
 //
-// On first call, it attempts to load configuration with retry logic.
-// Subsequent calls return immediately if already loaded, or return the
-// last error if loading failed.
+// The first call loads configuration using the configured retry policy.
+// Once a load succeeds, subsequent calls return nil immediately. While a load
+// is in progress, concurrent callers wait for it and receive its result. If a
+// load fails, its error is returned and the next call starts a fresh load
+// (again with the full retry policy), so a later invocation can succeed once
+// configuration becomes available, e.g. after the installer saves credentials.
 //
 // This method is intended for Lambda environments where configuration
 // loading happens lazily on first request. For HTTP servers, use Start instead.
@@ -119,17 +121,19 @@ func (r *Runtime) waitForLoad(ctx context.Context, state *lambdaState) error {
 	}
 }
 
-// loadWithRetry attempts to load configuration with retry logic.
+// loadWithRetry attempts to load configuration with retry logic. LoadFunc is
+// always attempted at least once.
 func (r *Runtime) loadWithRetry(ctx context.Context) error {
 	log := clog.FromContext(ctx)
 	var lastErr error
+	maxAttempts := max(r.config.MaxRetries, 1)
 
-	for attempt := 1; attempt <= r.config.MaxRetries; attempt++ {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if err := r.config.LoadFunc(ctx); err != nil {
 			lastErr = err
-			log.Warnf("[ghappsetup] attempt %d/%d failed: %v", attempt, r.config.MaxRetries, err)
+			log.Warnf("[ghappsetup] attempt %d/%d failed: %v", attempt, maxAttempts, err)
 
-			if attempt < r.config.MaxRetries {
+			if attempt < maxAttempts {
 				select {
 				case <-ctx.Done():
 					return ctx.Err()

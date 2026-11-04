@@ -33,6 +33,15 @@ func (m *mockSSMClient) PutParameter(ctx context.Context, params *ssm.PutParamet
 	if m.putErr != nil {
 		return nil, m.putErr
 	}
+	// Mirror SSM validation: tags and overwrite are mutually exclusive, and
+	// existing parameters are only replaced when overwrite is set.
+	overwrite := aws.ToBool(params.Overwrite)
+	if overwrite && len(params.Tags) > 0 {
+		return nil, fmt.Errorf("ValidationException: tags and overwrite can't be used together")
+	}
+	if _, exists := m.parameters[*params.Name]; exists && !overwrite {
+		return nil, &types.ParameterAlreadyExists{}
+	}
 	m.parameters[*params.Name] = *params.Value
 	return &ssm.PutParameterOutput{}, nil
 }
@@ -221,11 +230,25 @@ func TestAWSSSMStore_Save_WithTags(t *testing.T) {
 		t.Fatalf("Save() error = %v", err)
 	}
 
-	// Verify tags were applied to all parameters
+	// Verify tags were applied to all newly created parameters
 	for _, call := range mock.putCalls {
 		if len(call.Tags) != 2 {
 			t.Errorf("Parameter %q has %d tags, want 2", *call.Name, len(call.Tags))
 		}
+	}
+
+	// Saving again must update existing parameters even though tags are set.
+	creds.ClientSecret = "rotated"
+	mock.putCalls = nil
+	if err := store.Save(context.Background(), creds); err != nil {
+		t.Fatalf("second Save() error = %v", err)
+	}
+	if got := mock.parameters["/prefix/"+EnvGitHubClientSecret]; got != "rotated" {
+		t.Errorf("client secret = %q, want %q", got, "rotated")
+	}
+
+	if err := store.DisableInstaller(context.Background()); err != nil {
+		t.Fatalf("DisableInstaller() error = %v", err)
 	}
 }
 

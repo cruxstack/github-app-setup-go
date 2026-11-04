@@ -588,3 +588,49 @@ MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7MhgHW1FZ
 		t.Error("Custom field ANOTHER_FIELD was not saved")
 	}
 }
+
+func TestLocalEnvFileStore_PreservesUnrelatedLines(t *testing.T) {
+	tmpDir := t.TempDir()
+	envPath := filepath.Join(tmpDir, ".env")
+
+	unrelated := []string{
+		`GREETING="hello \"world\""`,
+		`PORT=8080 # http port`,
+		`HOME_REF='$HOME'`,
+	}
+	initial := strings.Join(unrelated, "\n") + "\n"
+	if err := os.WriteFile(envPath, []byte(initial), 0600); err != nil {
+		t.Fatalf("failed to write initial .env: %v", err)
+	}
+
+	store := NewLocalEnvFileStore(envPath)
+	creds := &AppCredentials{
+		AppID:         1,
+		ClientID:      "client",
+		ClientSecret:  "secret",
+		WebhookSecret: "webhook",
+		PrivateKey:    "key",
+	}
+
+	// Save repeatedly and disable the installer; unrelated lines must survive
+	// byte-for-byte rather than being re-quoted on every write.
+	for i := 0; i < 2; i++ {
+		if err := store.Save(context.Background(), creds); err != nil {
+			t.Fatalf("Save() error = %v", err)
+		}
+	}
+	if err := store.DisableInstaller(context.Background()); err != nil {
+		t.Fatalf("DisableInstaller() error = %v", err)
+	}
+
+	content, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("failed to read .env: %v", err)
+	}
+	lines := strings.Split(string(content), "\n")
+	for i, want := range unrelated {
+		if lines[i] != want {
+			t.Errorf("line %d = %q, want %q", i+1, lines[i], want)
+		}
+	}
+}

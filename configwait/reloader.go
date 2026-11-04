@@ -104,5 +104,9 @@ func (r *Reloader) doReload() {
 		return
 	}
 
+	if r.gate != nil {
+		r.gate.SetReady()
+	}
+
 	log.Infof("[reloader] configuration reloaded successfully")
 }

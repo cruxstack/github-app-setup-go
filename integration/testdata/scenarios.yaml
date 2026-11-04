@@ -176,6 +176,44 @@
     registered: true
     installer_disabled: true
 
+- name: "disabled_installer_rejects_callback"
+  description: "GET /callback cannot replace credentials once the installer is disabled"
+  preset_credentials:
+    app_id: 12345
+    app_slug: "my-app"
+    client_id: "Iv1.test"
+    client_secret: "test_secret"
+    webhook_secret: "test_webhook"
+    html_url: "https://github.com/apps/my-app"
+  mock_responses:
+    - method: POST
+      path: /api/v3/app-manifests/othercode1234567890/conversions
+      status: 201
+      body: |
+        {
+          "id": 66666,
+          "slug": "other-app",
+          "client_id": "Iv1.other",
+          "client_secret": "other_secret",
+          "webhook_secret": "other_webhook",
+          "pem": "other-key",
+          "html_url": "https://github.com/apps/other-app"
+        }
+  steps:
+    - action: request
+      method: POST
+      path: /setup/disable
+      expect_status: 303
+    - action: request
+      method: GET
+      path: /callback?code=othercode1234567890
+      expect_status: 404
+  expected_store:
+    registered: true
+    installer_disabled: true
+    app_id: 12345
+    app_slug: "my-app"
+
 - name: "disable_without_registration_fails"
   description: "POST /setup/disable fails when not registered"
   steps:

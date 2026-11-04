@@ -443,3 +443,78 @@ func TestReadTrimmedFile_NotExists(t *testing.T) {
 		t.Errorf("readTrimmedFile() error = %v, want os.IsNotExist", err)
 	}
 }
+
+func TestLocalFileStore_Save_RejectsUnsafeCustomFieldKeys(t *testing.T) {
+	baseCreds := func(key string) *AppCredentials {
+		return &AppCredentials{
+			AppID:         1,
+			ClientID:      "client",
+			ClientSecret:  "secret",
+			WebhookSecret: "webhook",
+			PrivateKey:    "original-key",
+			CustomFields:  map[string]string{key: "injected"},
+		}
+	}
+
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{"parent traversal", "../../escaped"},
+		{"nested traversal", "sub/../../escaped"},
+		{"absolute path", "/tmp/escaped"},
+		{"path separator", "sub/file"},
+		{"backslash separator", `..\escaped`},
+		{"dot dot", ".."},
+		{"dot", "."},
+		{"overwrites private key", "PRIVATE_KEY.PEM"},
+		{"creates installer disabled marker", "INSTALLER_DISABLED"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			storeDir := filepath.Join(root, "store")
+			store := NewLocalFileStore(storeDir)
+
+			if err := store.Save(context.Background(), baseCreds(tt.key)); err == nil {
+				t.Fatalf("Save() with custom field key %q error = nil, want error", tt.key)
+			}
+
+			if _, err := os.Stat(filepath.Join(root, "escaped")); !os.IsNotExist(err) {
+				t.Errorf("file written outside store directory (stat err = %v)", err)
+			}
+			if _, err := os.Stat(filepath.Join(storeDir, "installer-disabled")); !os.IsNotExist(err) {
+				t.Errorf("installer-disabled marker created (stat err = %v)", err)
+			}
+			if _, err := os.Stat(filepath.Join(storeDir, "private-key.pem")); !os.IsNotExist(err) {
+				t.Errorf("credentials partially written before validation failed (stat err = %v)", err)
+			}
+		})
+	}
+}
+
+func TestLocalFileStore_Save_AllowsPlainCustomFieldKeys(t *testing.T) {
+	dir := t.TempDir()
+	store := NewLocalFileStore(dir)
+	creds := &AppCredentials{
+		AppID:         1,
+		ClientID:      "client",
+		ClientSecret:  "secret",
+		WebhookSecret: "webhook",
+		PrivateKey:    "key",
+		CustomFields:  map[string]string{"CUSTOM_DOMAIN": "example.com", "build.version": "1.2.3"},
+	}
+	if err := store.Save(context.Background(), creds); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	for name, want := range map[string]string{"custom-domain": "example.com", "build.version": "1.2.3"} {
+		got, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if string(got) != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+}

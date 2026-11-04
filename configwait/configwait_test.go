@@ -164,10 +164,24 @@ func TestReadyGate_AllowedPathsPassThrough(t *testing.T) {
 		wantBody   string
 	}{
 		{"/setup", http.StatusOK, "setup page"},
+		{"/setup/", http.StatusOK, "setup page"},
 		{"/setup/callback", http.StatusOK, "setup page"},
 		{"/healthz", http.StatusOK, "setup page"},
 		{"/other", http.StatusServiceUnavailable, ""},
 		{"/webhook", http.StatusServiceUnavailable, ""},
+
+		// Allowed paths match on segment boundaries, not raw string prefixes.
+		{"/setupadmin", http.StatusServiceUnavailable, ""},
+		{"/healthzz", http.StatusServiceUnavailable, ""},
+
+		// Non-canonical paths never bypass the gate, in either direction.
+		{"/setup/../webhook", http.StatusServiceUnavailable, ""},
+		{"/setup/%2e%2e/webhook", http.StatusServiceUnavailable, ""},
+		{"/setup/%2E%2E%2Fwebhook", http.StatusServiceUnavailable, ""},
+		{"/webhook/../setup", http.StatusServiceUnavailable, ""},
+		{"/setup/./callback", http.StatusServiceUnavailable, ""},
+		{"//setup", http.StatusServiceUnavailable, ""},
+		{"/setup//callback", http.StatusServiceUnavailable, ""},
 	}
 
 	for _, tt := range tests {
@@ -184,6 +198,37 @@ func TestReadyGate_AllowedPathsPassThrough(t *testing.T) {
 
 			if tt.wantStatus == http.StatusOK && !called.Load() {
 				t.Error("Inner handler was not called for allowed path")
+			}
+		})
+	}
+}
+
+func TestReadyGate_AllowedPathNormalization(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	tests := []struct {
+		name    string
+		allowed []string
+		path    string
+		want    int
+	}{
+		{"trailing slash entry allows bare path", []string{"/setup/"}, "/setup", http.StatusOK},
+		{"trailing slash entry allows subtree", []string{"/setup/"}, "/setup/disable", http.StatusOK},
+		{"trailing slash entry rejects sibling", []string{"/setup/"}, "/setupadmin", http.StatusServiceUnavailable},
+		{"root entry allows only root", []string{"/"}, "/", http.StatusOK},
+		{"root entry does not allow subpaths", []string{"/"}, "/webhook", http.StatusServiceUnavailable},
+		{"empty entry is ignored", []string{""}, "/webhook", http.StatusServiceUnavailable},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gate := NewReadyGate(inner, tt.allowed)
+			rec := httptest.NewRecorder()
+			gate.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tt.path, nil))
+			if rec.Code != tt.want {
+				t.Errorf("path %q with allowed %q: status = %d, want %d", tt.path, tt.allowed, rec.Code, tt.want)
 			}
 		})
 	}
@@ -356,5 +401,40 @@ func TestReloader_ContextCancellation(t *testing.T) {
 		// Good, reloader stopped
 	case <-time.After(100 * time.Millisecond):
 		t.Error("Reloader did not stop after context cancellation")
+	}
+}
+
+func TestWait_NonPositiveMaxRetriesStillLoads(t *testing.T) {
+	for _, maxRetries := range []int{0, -1} {
+		var calls atomic.Int32
+		wantErr := errors.New("not configured")
+		err := Wait(context.Background(), Config{MaxRetries: maxRetries}, func(ctx context.Context) error {
+			calls.Add(1)
+			return wantErr
+		})
+		if !errors.Is(err, wantErr) {
+			t.Errorf("MaxRetries=%d: Wait() error = %v, want %v", maxRetries, err, wantErr)
+		}
+		if got := calls.Load(); got != 1 {
+			t.Errorf("MaxRetries=%d: load called %d times, want 1", maxRetries, got)
+		}
+	}
+}
+
+func TestReloader_SuccessMarksGateReady(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	gate := NewReadyGate(nil, nil)
+	reloader := NewReloader(ctx, gate, func(ctx context.Context) error { return nil })
+	reloader.Start()
+	reloader.Trigger()
+
+	deadline := time.Now().Add(time.Second)
+	for !gate.IsReady() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !gate.IsReady() {
+		t.Error("gate.IsReady() = false after successful reload, want true")
 	}
 }

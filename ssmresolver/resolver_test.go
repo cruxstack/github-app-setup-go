@@ -34,8 +34,28 @@ func TestIsSSMARN(t *testing.T) {
 			value: "arn:aws:ssm:eu-west-1:999888777666:parameter//app/secret",
 			want:  true,
 		},
+		{
+			name:  "valid GovCloud partition ARN",
+			value: "arn:aws-us-gov:ssm:us-gov-west-1:123456789012:parameter/my-param",
+			want:  true,
+		},
+		{
+			name:  "valid China partition ARN",
+			value: "arn:aws-cn:ssm:cn-north-1:123456789012:parameter/my-param",
+			want:  true,
+		},
+		{
+			name:  "valid ISO-B partition ARN",
+			value: "arn:aws-iso-b:ssm:us-isob-east-1:123456789012:parameter/my-param",
+			want:  true,
+		},
 
 		// Invalid ARNs
+		{
+			name:  "unknown partition prefix",
+			value: "arn:awsx:ssm:us-east-1:123456789012:parameter/my-param",
+			want:  false,
+		},
 		{
 			name:  "empty string",
 			value: "",

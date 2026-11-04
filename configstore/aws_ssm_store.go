@@ -119,36 +119,47 @@ func (s *AWSSSMStore) Save(ctx context.Context, creds *AppCredentials) error {
 }
 
 // putParameter creates or updates a single SSM parameter.
+//
+// SSM rejects PutParameter requests that set both Tags and Overwrite, so when
+// tags are configured the parameter is first created with tags (no overwrite)
+// and, if it already exists, updated in place without tags.
 func (s *AWSSSMStore) putParameter(ctx context.Context, name, value string) error {
 	input := &ssm.PutParameterInput{
-		Name:      aws.String(s.ParameterPrefix + name),
-		Value:     aws.String(value),
-		Type:      types.ParameterTypeSecureString,
-		Overwrite: aws.Bool(true),
-		DataType:  aws.String("text"),
+		Name:     aws.String(s.ParameterPrefix + name),
+		Value:    aws.String(value),
+		Type:     types.ParameterTypeSecureString,
+		DataType: aws.String("text"),
 	}
 
 	if s.KMSKeyID != "" {
 		input.KeyId = aws.String(s.KMSKeyID)
 	}
 
-	if len(s.Tags) > 0 {
-		var tags []types.Tag
-		for key, value := range s.Tags {
-			tags = append(tags, types.Tag{
-				Key:   aws.String(key),
-				Value: aws.String(value),
-			})
-		}
-		input.Tags = tags
-	}
-
-	_, err := s.ssmClient.PutParameter(ctx, input)
-	if err != nil {
+	if len(s.Tags) == 0 {
+		input.Overwrite = aws.Bool(true)
+		_, err := s.ssmClient.PutParameter(ctx, input)
 		return err
 	}
 
-	return nil
+	tags := make([]types.Tag, 0, len(s.Tags))
+	for key, value := range s.Tags {
+		tags = append(tags, types.Tag{
+			Key:   aws.String(key),
+			Value: aws.String(value),
+		})
+	}
+	input.Tags = tags
+
+	_, err := s.ssmClient.PutParameter(ctx, input)
+	var alreadyExists *types.ParameterAlreadyExists
+	if !errors.As(err, &alreadyExists) {
+		return err
+	}
+
+	input.Tags = nil
+	input.Overwrite = aws.Bool(true)
+	_, err = s.ssmClient.PutParameter(ctx, input)
+	return err
 }
 
 // Status returns the current registration state by checking required SSM parameters.

@@ -58,6 +58,11 @@ type Config struct {
 	// AllowedPaths specifies HTTP paths that should be served even before
 	// configuration is loaded. This is typically used for health checks and
 	// installer endpoints. Only applicable in HTTP environments.
+	//
+	// Each entry matches the path itself and anything beneath it on a
+	// path-segment boundary ("/setup" allows "/setup/disable" but not
+	// "/setupadmin"); "/" matches only the root path. Non-canonical request
+	// paths (dot segments, repeated slashes) are never allowed early.
 	AllowedPaths []string
 
 	// MaxRetries is the maximum number of times to retry loading configuration.
@@ -166,11 +171,16 @@ func (r *Runtime) setReady(ready bool) {
 	}
 }
 
-// Reload triggers a configuration reload by calling LoadFunc.
-// This is safe to call from multiple goroutines; concurrent reload
-// requests are coalesced.
+// Reload triggers a configuration reload by calling LoadFunc. On success the
+// runtime is marked ready, so a reload after a failed or still-pending Start
+// (e.g., once the installer has saved credentials) opens the ReadyGate.
+// Use ReloadCallback for asynchronous, coalesced reload requests.
 func (r *Runtime) Reload(ctx context.Context) error {
-	return r.config.LoadFunc(ctx)
+	if err := r.config.LoadFunc(ctx); err != nil {
+		return err
+	}
+	r.setReady(true)
+	return nil
 }
 
 // ReloadCallback returns a function suitable for use as installer.Config.OnReloadNeeded.

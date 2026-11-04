@@ -5,8 +5,10 @@ package installer
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/cruxstack/github-app-setup-go/configstore"
@@ -180,6 +182,33 @@ func TestInstallURLFor(t *testing.T) {
 	}
 }
 
+func TestInstallURLFor_EscapesSlug(t *testing.T) {
+	h := &Handler{config: Config{GitHubURL: "https://github.com"}}
+	got := h.installURLFor("../../evil", "")
+	want := "https://github.com/apps/..%2F..%2Fevil/installations/new"
+	if got != want {
+		t.Errorf("installURLFor() = %q, want %q", got, want)
+	}
+}
+
+func TestHandler_handleIndex_EscapesOrgInFormAction(t *testing.T) {
+	h, _ := New(Config{Store: &mockStore{}, GitHubOrg: "../../evil"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/setup", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "/organizations/../../evil/") {
+		t.Error("form action contains unescaped org path traversal")
+	}
+	if !strings.Contains(body, "/organizations/..%2f..%2fevil/settings/apps/new") &&
+		!strings.Contains(body, "/organizations/..%2F..%2Fevil/settings/apps/new") {
+		t.Error("form action does not contain escaped org")
+	}
+}
+
 func TestManifestClone(t *testing.T) {
 	t.Run("nil manifest returns nil", func(t *testing.T) {
 		var m *Manifest = nil
@@ -316,6 +345,14 @@ func TestNew_Validation(t *testing.T) {
 		h, _ := New(Config{Store: store, GitHubURL: ""})
 		if h.config.GitHubURL != "https://github.com" {
 			t.Errorf("GitHubURL = %q, want %q", h.config.GitHubURL, "https://github.com")
+		}
+	})
+
+	t.Run("trailing slash is trimmed from GitHubURL", func(t *testing.T) {
+		store := &mockStore{}
+		h, _ := New(Config{Store: store, GitHubURL: "https://ghe.example.com/"})
+		if h.config.GitHubURL != "https://ghe.example.com" {
+			t.Errorf("GitHubURL = %q, want %q", h.config.GitHubURL, "https://ghe.example.com")
 		}
 	})
 
@@ -471,6 +508,93 @@ func TestHandler_handleCallback_InvalidCode(t *testing.T) {
 				t.Errorf("handleCallback() with code %q status = %d, want %d", tt.code, rec.Code, tt.wantStatus)
 			}
 		})
+	}
+}
+
+func TestHandler_handleCallback_OnCredentialsSaved(t *testing.T) {
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id": 1, "slug": "app", "pem": "key"}`))
+	}))
+	defer github.Close()
+
+	tests := []struct {
+		name         string
+		saveErr      error
+		wantStatus   int
+		wantCallback bool
+	}{
+		{"called after successful save", nil, http.StatusOK, true},
+		{"not called when save fails", errors.New("boom"), http.StatusInternalServerError, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			saved := false
+			called := false
+			store := &mockStore{
+				saveFunc: func(ctx context.Context, creds *configstore.AppCredentials) error {
+					if tt.saveErr == nil {
+						saved = true
+					}
+					return tt.saveErr
+				},
+			}
+			h, _ := New(Config{
+				Store:     store,
+				GitHubURL: github.URL,
+				OnCredentialsSaved: func(ctx context.Context, creds *configstore.AppCredentials) error {
+					called = true
+					if !saved {
+						t.Error("OnCredentialsSaved called before credentials were saved")
+					}
+					return nil
+				},
+			})
+
+			req := httptest.NewRequest(http.MethodGet, "/callback?code=validcode1234567890", nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+			if called != tt.wantCallback {
+				t.Errorf("OnCredentialsSaved called = %v, want %v", called, tt.wantCallback)
+			}
+		})
+	}
+}
+
+func TestHandler_handleCallback_DisabledInstaller(t *testing.T) {
+	exchanged := false
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		exchanged = true
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id": 1}`))
+	}))
+	defer github.Close()
+
+	store := &mockStore{
+		statusFunc: func(ctx context.Context) (*configstore.InstallerStatus, error) {
+			return &configstore.InstallerStatus{Registered: true, InstallerDisabled: true}, nil
+		},
+		saveFunc: func(ctx context.Context, creds *configstore.AppCredentials) error {
+			t.Error("Save called while installer is disabled")
+			return nil
+		},
+	}
+	h, _ := New(Config{Store: store, GitHubURL: github.URL})
+
+	req := httptest.NewRequest(http.MethodGet, "/callback?code=validcode1234567890", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+	if exchanged {
+		t.Error("code was exchanged with GitHub while installer is disabled")
 	}
 }
 
